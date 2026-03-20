@@ -26,14 +26,6 @@ export interface AppState {
   triggerDownload: boolean;
   setTriggerDownload: (val: boolean) => void;
 
-  /** 局域网画面回传（配合服务端 8082；浏览器侧非原生 NDI，可再接 OBS 转 NDI） */
-  mirrorMode: 'off' | 'publish' | 'view';
-  setMirrorMode: (m: 'off' | 'publish' | 'view') => void;
-  mirrorPublishFps: number;
-  mirrorJpegQuality: number;
-  /** 编码时画面最长边上限（像素），减轻 PAD 上行压力 */
-  mirrorMaxEdge: number;
-
   /**
    * 多终端同步：standalone 不连 WebSocket；controller 发送 pointer；display 只接收远端 pointer。
    * 与电脑 display 使用相同 roomId + 同步服务地址即可同房间。
@@ -76,12 +68,6 @@ export const useAppStore = create<AppState>((set) => ({
   setAppState: (newState) => set((state) => ({ ...state, ...newState })),
   triggerDownload: false,
   setTriggerDownload: (val) => set({ triggerDownload: val }),
-
-  mirrorMode: 'off',
-  setMirrorMode: (m) => set({ mirrorMode: m }),
-  mirrorPublishFps: 12,
-  mirrorJpegQuality: 0.72,
-  mirrorMaxEdge: 1280,
 
   syncRole: 'standalone',
   setSyncRole: (r) => set({ syncRole: r }),

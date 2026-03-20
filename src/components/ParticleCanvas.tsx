@@ -30,8 +30,6 @@ export const ParticleCanvas: React.FC = () => {
 
   const [wsConnected, setWsConnected] = useState(false);
   const [wsDiag, setWsDiag] = useState<string>('');
-  const [mirrorDiag, setMirrorDiag] = useState<string>('');
-  const mirrorMode = useAppStore((s) => s.mirrorMode);
   const syncRole = useAppStore((s) => s.syncRole);
   const roomId = useAppStore((s) => s.roomId);
   const syncWsBaseUrl = useAppStore((s) => s.syncWsBaseUrl);
@@ -42,8 +40,6 @@ export const ParticleCanvas: React.FC = () => {
   const pointersRef = useRef<Record<string, { x: number; y: number; isDown: boolean }>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
-  const mirrorWsRef = useRef<WebSocket | null>(null);
-  const mirrorImgRef = useRef<HTMLImageElement | null>(null);
   const clientIdRef = useRef<string>('');
   const suppressBroadcastRef = useRef<boolean>(false);
   const lastPointerSendAtRef = useRef<number>(0);
@@ -216,64 +212,6 @@ export const ParticleCanvas: React.FC = () => {
       }
     };
   }, [syncRole, roomId, syncWsBaseUrl]);
-
-  // 局域网画面回传（服务端 MirrorWS，默认 8082；非原生 NDI，供 OBS 等再转码）
-  useEffect(() => {
-    if (mirrorMode === 'off') {
-      try {
-        mirrorWsRef.current?.close();
-      } catch {
-        // ignore
-      }
-      mirrorWsRef.current = null;
-      setMirrorDiag('');
-      return;
-    }
-
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${protocol}://${window.location.hostname}:8082`;
-    setMirrorDiag(`连接 ${url} …`);
-
-    const ws = new WebSocket(url);
-    ws.binaryType = 'arraybuffer';
-    mirrorWsRef.current = ws;
-
-    if (mirrorMode === 'view') {
-      ws.onmessage = (ev) => {
-        if (typeof ev.data === 'string') return;
-        const blob = new Blob([ev.data], { type: 'image/jpeg' });
-        const objectUrl = URL.createObjectURL(blob);
-        const img = mirrorImgRef.current;
-        if (img) {
-          const prev = img.dataset.blobUrl;
-          if (prev) URL.revokeObjectURL(prev);
-          img.dataset.blobUrl = objectUrl;
-          img.src = objectUrl;
-        }
-      };
-    }
-
-    ws.onopen = () => {
-      setMirrorDiag(`Mirror ON: ${url}`);
-    };
-    ws.onerror = () => {
-      setMirrorDiag(`Mirror 错误（检查本机防火墙是否放行 TCP 8082）: ${url}`);
-    };
-    ws.onclose = () => {
-      setMirrorDiag('Mirror 已断开');
-    };
-
-    return () => {
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      if (mirrorWsRef.current === ws) {
-        mirrorWsRef.current = null;
-      }
-    };
-  }, [mirrorMode]);
 
   useEffect(() => {
     // 监听粒子参数变化并广播给其他客户端
@@ -466,9 +404,6 @@ export const ParticleCanvas: React.FC = () => {
       noise3D: createNoise3D(mulberry32(state.seed)),
       animationFrameId: 0,
       cachedImageData: null,
-      mirrorCapCanvas: null as HTMLCanvasElement | null,
-      mirrorPending: false,
-      mirrorLastAt: 0,
     };
 
     // Initialize particles
@@ -888,81 +823,10 @@ export const ParticleCanvas: React.FC = () => {
     const temp = sim.rtA;
     sim.rtA = sim.rtB;
     sim.rtB = temp;
-
-    // 5. 局域镜像：按 FPS 将当前 WebGL 画布缩放编码为 JPEG 发往 8082
-    const ms = useAppStore.getState();
-    if (ms.mirrorMode === 'publish') {
-      const mws = mirrorWsRef.current;
-      if (mws && mws.readyState === WebSocket.OPEN && !sim.mirrorPending) {
-        const fps = Math.max(1, ms.mirrorPublishFps);
-        const interval = 1000 / fps;
-        if (now - (sim.mirrorLastAt || 0) >= interval) {
-          sim.mirrorLastAt = now;
-          const el = sim.renderer.domElement;
-          const w = el.width;
-          const h = el.height;
-          const maxEdge = Math.max(320, ms.mirrorMaxEdge);
-          const scale = Math.min(1, maxEdge / Math.max(w, h, 1));
-          const tw = Math.max(1, Math.round(w * scale));
-          const th = Math.max(1, Math.round(h * scale));
-          if (!sim.mirrorCapCanvas) {
-            sim.mirrorCapCanvas = document.createElement('canvas');
-          }
-          const cap = sim.mirrorCapCanvas;
-          if (cap.width !== tw || cap.height !== th) {
-            cap.width = tw;
-            cap.height = th;
-          }
-          const ctx2d = cap.getContext('2d');
-          if (ctx2d) {
-            ctx2d.drawImage(el, 0, 0, tw, th);
-            sim.mirrorPending = true;
-            const q = ms.mirrorJpegQuality;
-            cap.toBlob(
-              (blob) => {
-                sim.mirrorPending = false;
-                const cur = mirrorWsRef.current;
-                if (blob && cur && cur.readyState === WebSocket.OPEN) {
-                  try {
-                    cur.send(blob);
-                  } catch {
-                    // ignore
-                  }
-                }
-              },
-              'image/jpeg',
-              q,
-            );
-          }
-        }
-      }
-    }
   };
 
   return (
     <div className="w-full h-full flex items-center justify-center bg-black overflow-hidden relative">
-      {mirrorMode === 'view' ? (
-        <div className="fixed inset-0 z-[10001] bg-black flex flex-col">
-          <img
-            ref={mirrorImgRef}
-            alt="局域网镜像"
-            className="flex-1 w-full object-contain select-none bg-black"
-          />
-          <div className="shrink-0 p-2 flex flex-wrap justify-between items-center gap-2 bg-black/85 text-white text-[11px] border-t border-white/15">
-            <span>
-              接收 PAD 画面 · 可配合 OBS「窗口采集」转 NDI ·{' '}
-              <span className="text-amber-200/90">{mirrorDiag}</span>
-            </span>
-            <button
-              type="button"
-              className="pointer-events-auto px-3 py-1.5 rounded border border-white/30 hover:bg-white/10 text-xs"
-              onClick={() => useAppStore.getState().setMirrorMode('off')}
-            >
-              关闭预览
-            </button>
-          </div>
-        </div>
-      ) : null}
       <div
         className="absolute top-16 right-3 z-[9999] px-3 py-1 text-[11px] leading-tight rounded bg-black/70 border border-white/20 text-white pointer-events-none"
       >
@@ -974,9 +838,6 @@ export const ParticleCanvas: React.FC = () => {
           <div className="opacity-90">room: {roomId}</div>
         ) : null}
         {wsDiag ? <div className="opacity-90">{wsDiag}</div> : null}
-        {mirrorMode !== 'off' && mirrorDiag ? (
-          <div className="opacity-90 text-amber-100/90 mt-0.5 border-t border-white/10 pt-0.5">Mirror: {mirrorDiag}</div>
-        ) : null}
       </div>
       {state.useImageColors && state.imageUrl && (
         <img 

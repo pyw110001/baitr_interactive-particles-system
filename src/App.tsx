@@ -11,11 +11,6 @@ import { useAppStore } from './store';
 export default function App() {
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
-    const m = q.get('mirror');
-    if (m === 'publish' || m === 'view') {
-      useAppStore.getState().setMirrorMode(m);
-    }
-
     const role = q.get('role');
     if (role === 'controller' || role === 'display') {
       useAppStore.getState().setSyncRole(role);

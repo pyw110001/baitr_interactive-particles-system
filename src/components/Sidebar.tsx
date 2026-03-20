@@ -1,6 +1,6 @@
 import React, { useRef } from 'react';
 import { useAppStore } from '../store';
-import { ChevronLeft, Settings, Upload, Download, Pause, Play, Save, MonitorPlay, Smartphone, Monitor } from 'lucide-react';
+import { ChevronLeft, Settings, Upload, Download, Pause, Play, Save, Smartphone, Monitor } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -321,88 +321,6 @@ export const Sidebar: React.FC = () => {
             <br />
             若 PAD 打开的页面不在同步服务同一台机器，请加：{' '}
             <code className="text-gray-400">?ws=ws://电脑IP:8081</code>
-          </p>
-        </Section>
-
-        <Section title="局域网画面 · NDI 工作流">
-          <div className="flex items-center gap-2 mb-2 text-white/90">
-            <MonitorPlay size={16} />
-            <span className="text-xs font-semibold">PAD → 电脑 低延迟回传</span>
-          </div>
-          <p className="text-xs text-gray-400 mb-3 leading-relaxed">
-            浏览器无法直接生成标准 NDI 码流。此处通过 <strong className="text-gray-300">WebSocket 8082</strong> 将画布以
-            JPEG 广播到局域网；电脑端「接收预览」全屏显示后，可用 <strong className="text-gray-300">OBS 窗口采集</strong> +
-            NDI 插件转为真正的 NDI 输出。
-          </p>
-          <div className="flex flex-wrap gap-2 mb-3">
-            <button
-              type="button"
-              onClick={() => state.setMirrorMode('off')}
-              className={cn(
-                'py-1.5 px-2 rounded border text-xs',
-                state.mirrorMode === 'off'
-                  ? 'bg-white text-black border-white'
-                  : 'bg-white/10 border-white/20 hover:bg-white/15',
-              )}
-            >
-              关闭
-            </button>
-            <button
-              type="button"
-              onClick={() => state.setMirrorMode('publish')}
-              className={cn(
-                'py-1.5 px-2 rounded border text-xs',
-                state.mirrorMode === 'publish'
-                  ? 'bg-cyan-600 text-white border-cyan-400'
-                  : 'bg-white/10 border-white/20 hover:bg-white/15',
-              )}
-            >
-              播送画面 (PAD)
-            </button>
-            <button
-              type="button"
-              onClick={() => state.setMirrorMode('view')}
-              className={cn(
-                'py-1.5 px-2 rounded border text-xs',
-                state.mirrorMode === 'view'
-                  ? 'bg-violet-600 text-white border-violet-400'
-                  : 'bg-white/10 border-white/20 hover:bg-white/15',
-              )}
-            >
-              接收预览 (PC)
-            </button>
-          </div>
-          {state.mirrorMode === 'publish' ? (
-            <div className="space-y-1 border border-white/10 rounded p-2 bg-black/40">
-              <Slider
-                label="回传帧率 (FPS)"
-                value={state.mirrorPublishFps}
-                min={4}
-                max={24}
-                step={1}
-                onChange={(v) => state.setAppState({ mirrorPublishFps: v })}
-              />
-              <Slider
-                label="JPEG 质量"
-                value={state.mirrorJpegQuality}
-                min={0.45}
-                max={0.92}
-                step={0.02}
-                onChange={(v) => state.setAppState({ mirrorJpegQuality: v })}
-              />
-              <Slider
-                label="编码最长边 (px)"
-                value={state.mirrorMaxEdge}
-                min={640}
-                max={1920}
-                step={40}
-                onChange={(v) => state.setAppState({ mirrorMaxEdge: v })}
-              />
-            </div>
-          ) : null}
-          <p className="text-[10px] text-gray-500 mt-2">
-            快捷 URL：<code className="text-gray-400">?mirror=publish</code> 或{' '}
-            <code className="text-gray-400">?mirror=view</code>
           </p>
         </Section>
 
