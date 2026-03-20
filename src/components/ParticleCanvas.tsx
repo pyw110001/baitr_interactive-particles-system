@@ -1,7 +1,18 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { createNoise3D } from 'simplex-noise';
 import { useAppStore } from '../store';
+
+function resolveSyncWsUrl(): string | null {
+  const s = useAppStore.getState();
+  const envBase = (import.meta.env.VITE_SYNC_WS_BASE as string | undefined)?.trim() ?? '';
+  const override = (s.syncWsBaseUrl || envBase).trim();
+  if (override) {
+    return override.replace(/\/$/, '');
+  }
+  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${protocol}://${window.location.hostname}:8081`;
+}
 
 // Simple seeded random function
 function mulberry32(a: number) {
@@ -16,11 +27,304 @@ function mulberry32(a: number) {
 export const ParticleCanvas: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const state = useAppStore();
-  
+
+  const [wsConnected, setWsConnected] = useState(false);
+  const [wsDiag, setWsDiag] = useState<string>('');
+  const [mirrorDiag, setMirrorDiag] = useState<string>('');
+  const mirrorMode = useAppStore((s) => s.mirrorMode);
+  const syncRole = useAppStore((s) => s.syncRole);
+  const roomId = useAppStore((s) => s.roomId);
+  const syncWsBaseUrl = useAppStore((s) => s.syncWsBaseUrl);
+
   // Refs for mutable state that shouldn't trigger re-renders
   const simRef = useRef<any>(null);
-  const mouseRef = useRef({ x: -1000, y: -1000, isDown: false });
+  // Multi-pointer input state (key: `${clientId}:${pointerId}`)
+  const pointersRef = useRef<Record<string, { x: number; y: number; isDown: boolean }>>({});
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const mirrorWsRef = useRef<WebSocket | null>(null);
+  const mirrorImgRef = useRef<HTMLImageElement | null>(null);
+  const clientIdRef = useRef<string>('');
+  const suppressBroadcastRef = useRef<boolean>(false);
+  const lastPointerSendAtRef = useRef<number>(0);
+  const lastParamsSendAtRef = useRef<number>(0);
+
+  // pointerId 生成（兼容没有 crypto.randomUUID 的环境）
+  if (!clientIdRef.current) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      clientIdRef.current = (crypto as any)?.randomUUID?.() || String(Math.random()).slice(2);
+    } catch {
+      clientIdRef.current = String(Math.random()).slice(2);
+    }
+  }
   const imageCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    // 单机模式：不建立 WebSocket（本地 pointer 仍工作）
+    if (syncRole === 'standalone') {
+      try {
+        wsRef.current?.close();
+      } catch {
+        // ignore
+      }
+      wsRef.current = null;
+      setWsConnected(false);
+      setWsDiag('单机模式（未连接同步）');
+      return;
+    }
+
+    const rid = roomId.trim();
+    if (!rid) {
+      try {
+        wsRef.current?.close();
+      } catch {
+        // ignore
+      }
+      wsRef.current = null;
+      setWsConnected(false);
+      setWsDiag('请设置房间 ID（PAD 与电脑需一致）');
+      return;
+    }
+
+    const wsUrl = resolveSyncWsUrl();
+    if (!wsUrl) {
+      setWsConnected(false);
+      setWsDiag('无法解析同步服务地址');
+      return;
+    }
+
+    setWsDiag(`连接中: ${wsUrl} · room=${rid} · ${syncRole}`);
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setWsConnected(true);
+      setWsDiag(`Sync ON: ${wsUrl} · room=${rid} · ${syncRole}`);
+      try {
+        ws.send(JSON.stringify({ type: 'sync-join', roomId: rid }));
+
+        ws.send(
+          JSON.stringify({
+            type: 'particle-sync',
+            action: 'hello',
+            data: { clientId: clientIdRef.current, role: syncRole },
+            originId: clientIdRef.current,
+            source: syncRole,
+          }),
+        );
+
+        const s = useAppStore.getState();
+        const params = {
+          resolution: s.resolution,
+          width: s.width,
+          height: s.height,
+          seed: s.seed,
+          particleCount: s.particleCount,
+          flowSpeed: s.flowSpeed,
+          noiseScale: s.noiseScale,
+          trailPersistence: s.trailPersistence,
+          vortexStrength: s.vortexStrength,
+          vortexRange: s.vortexRange,
+          clickRepulsion: s.clickRepulsion,
+          particleSize: s.particleSize,
+          colors: s.colors,
+          useImageColors: s.useImageColors,
+          imageOpacity: s.imageOpacity,
+        };
+        ws.send(
+          JSON.stringify({
+            type: 'particle-sync',
+            action: 'params',
+            data: params,
+            originId: clientIdRef.current,
+            source: syncRole,
+          }),
+        );
+      } catch {
+        // ignore
+      }
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg?.type !== 'particle-sync') return;
+        const originId = msg?.originId;
+
+        if (originId && originId === clientIdRef.current) {
+          return;
+        }
+
+        if (msg.action === 'params' && msg.data) {
+          suppressBroadcastRef.current = true;
+          useAppStore.getState().setAppState(msg.data);
+          window.setTimeout(() => {
+            suppressBroadcastRef.current = false;
+          }, 50);
+          return;
+        }
+
+        if (msg.action === 'pointer' && msg.data) {
+          const data = msg.data as {
+            nx?: number;
+            ny?: number;
+            x?: number;
+            y?: number;
+            isDown?: boolean;
+            pointerId?: string;
+          };
+          const dims = useAppStore.getState();
+          let x: number;
+          let y: number;
+          if (typeof data.nx === 'number' && typeof data.ny === 'number') {
+            x = data.nx * dims.width;
+            y = data.ny * dims.height;
+          } else if (typeof data.x === 'number' && typeof data.y === 'number') {
+            x = data.x;
+            y = data.y;
+          } else {
+            return;
+          }
+          const key = `${originId || 'remote'}:${data.pointerId ?? 'mouse'}`;
+          pointersRef.current[key] = { x, y, isDown: Boolean(data.isDown) };
+          return;
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    ws.onerror = () => {
+      setWsConnected(false);
+      setWsDiag(`Sync OFF (error): ${wsUrl}`);
+    };
+
+    ws.onclose = () => {
+      setWsConnected(false);
+      setWsDiag(`Sync OFF (close): ${wsUrl}`);
+    };
+
+    return () => {
+      try {
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+        }
+        ws.close();
+      } catch {
+        // ignore
+      }
+    };
+  }, [syncRole, roomId, syncWsBaseUrl]);
+
+  // 局域网画面回传（服务端 MirrorWS，默认 8082；非原生 NDI，供 OBS 等再转码）
+  useEffect(() => {
+    if (mirrorMode === 'off') {
+      try {
+        mirrorWsRef.current?.close();
+      } catch {
+        // ignore
+      }
+      mirrorWsRef.current = null;
+      setMirrorDiag('');
+      return;
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const url = `${protocol}://${window.location.hostname}:8082`;
+    setMirrorDiag(`连接 ${url} …`);
+
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    mirrorWsRef.current = ws;
+
+    if (mirrorMode === 'view') {
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === 'string') return;
+        const blob = new Blob([ev.data], { type: 'image/jpeg' });
+        const objectUrl = URL.createObjectURL(blob);
+        const img = mirrorImgRef.current;
+        if (img) {
+          const prev = img.dataset.blobUrl;
+          if (prev) URL.revokeObjectURL(prev);
+          img.dataset.blobUrl = objectUrl;
+          img.src = objectUrl;
+        }
+      };
+    }
+
+    ws.onopen = () => {
+      setMirrorDiag(`Mirror ON: ${url}`);
+    };
+    ws.onerror = () => {
+      setMirrorDiag(`Mirror 错误（检查本机防火墙是否放行 TCP 8082）: ${url}`);
+    };
+    ws.onclose = () => {
+      setMirrorDiag('Mirror 已断开');
+    };
+
+    return () => {
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      if (mirrorWsRef.current === ws) {
+        mirrorWsRef.current = null;
+      }
+    };
+  }, [mirrorMode]);
+
+  useEffect(() => {
+    // 监听粒子参数变化并广播给其他客户端
+    const unsubscribe = useAppStore.subscribe((newState, prevState) => {
+      if (suppressBroadcastRef.current) return;
+      if (newState.syncRole === 'standalone') return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+      const now = Date.now();
+      if (now - lastParamsSendAtRef.current < 80) return; // throttle
+
+      // 只广播会影响外观/运动的参数子集
+      const params = {
+        resolution: newState.resolution,
+        width: newState.width,
+        height: newState.height,
+        seed: newState.seed,
+        particleCount: newState.particleCount,
+        flowSpeed: newState.flowSpeed,
+        noiseScale: newState.noiseScale,
+        trailPersistence: newState.trailPersistence,
+        vortexStrength: newState.vortexStrength,
+        vortexRange: newState.vortexRange,
+        clickRepulsion: newState.clickRepulsion,
+        particleSize: newState.particleSize,
+        // 颜色相关（如果你也需要可同步）
+        colors: newState.colors,
+        useImageColors: newState.useImageColors,
+        imageOpacity: newState.imageOpacity,
+      };
+
+      // 粗略判断：避免和 prevState 无任何变化时广播
+      const prev = prevState as any;
+      const changed = Object.keys(params).some((k) => (params as any)[k] !== (prev as any)[k]);
+      if (!changed) return;
+
+      ws.send(
+        JSON.stringify({
+          type: 'particle-sync',
+          action: 'params',
+          data: params,
+          originId: clientIdRef.current,
+          source: newState.syncRole,
+        }),
+      );
+      lastParamsSendAtRef.current = now;
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -29,6 +333,8 @@ export const ParticleCanvas: React.FC = () => {
     const renderer = new THREE.WebGLRenderer({ preserveDrawingBuffer: true, antialias: false, alpha: true });
     renderer.setClearColor(0x000000, 0); // Transparent background
     renderer.setSize(state.width, state.height, false);
+    // Prevent the browser from handling touch gestures (scroll/pinch) over the canvas.
+    renderer.domElement.style.touchAction = 'none';
     renderer.domElement.style.maxWidth = '100%';
     renderer.domElement.style.maxHeight = '100%';
     renderer.domElement.style.aspectRatio = `${state.width} / ${state.height}`;
@@ -160,27 +466,178 @@ export const ParticleCanvas: React.FC = () => {
       noise3D: createNoise3D(mulberry32(state.seed)),
       animationFrameId: 0,
       cachedImageData: null,
+      mirrorCapCanvas: null as HTMLCanvasElement | null,
+      mirrorPending: false,
+      mirrorLastAt: 0,
     };
 
     // Initialize particles
     initParticles();
 
-    // Event Listeners
-    const handleMouseMove = (e: MouseEvent) => {
+    // Event Listeners（坐标：相对 canvas 包围盒归一化到 [0,1]，线上只传 nx/ny）
+    const setLocalPointer = (pointerId: string, clientX: number, clientY: number, isDown: boolean) => {
+      const app = useAppStore.getState();
+      if (app.syncRole === 'display') {
+        return;
+      }
+
       const rect = renderer.domElement.getBoundingClientRect();
-      const scaleX = state.width / rect.width;
-      const scaleY = state.height / rect.height;
-      mouseRef.current.x = (e.clientX - rect.left) * scaleX;
-      mouseRef.current.y = (e.clientY - rect.top) * scaleY;
+      const rw = Math.max(1e-6, rect.width);
+      const rh = Math.max(1e-6, rect.height);
+      const nx = Math.min(1, Math.max(0, (clientX - rect.left) / rw));
+      const ny = Math.min(1, Math.max(0, (clientY - rect.top) / rh));
+
+      const x = nx * app.width;
+      const y = ny * app.height;
+      const key = `${clientIdRef.current}:${pointerId}`;
+      const prev = pointersRef.current[key];
+      pointersRef.current[key] = { x, y, isDown };
+
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (app.syncRole !== 'controller') return;
+
+      const now = Date.now();
+      const isDownChanged = prev ? prev.isDown !== isDown : isDown;
+      const shouldSend = isDownChanged || now - lastPointerSendAtRef.current >= 33;
+      if (!shouldSend) return;
+
+      ws.send(
+        JSON.stringify({
+          type: 'particle-sync',
+          action: 'pointer',
+          originId: clientIdRef.current,
+          source: 'controller',
+          data: { nx, ny, isDown, pointerId },
+        }),
+      );
+      lastPointerSendAtRef.current = now;
     };
-    const handleMouseDown = () => { mouseRef.current.isDown = true; };
-    const handleMouseUp = () => { mouseRef.current.isDown = false; };
-    const handleMouseLeave = () => { mouseRef.current.x = -1000; mouseRef.current.y = -1000; mouseRef.current.isDown = false; };
+
+    // Mouse (desktop)
+    const handleMouseMove = (e: MouseEvent) => {
+      const key = `${clientIdRef.current}:mouse`;
+      const current = pointersRef.current[key];
+      setLocalPointer('mouse', e.clientX, e.clientY, current?.isDown ?? false);
+    };
+    const handleMouseDown = (e: MouseEvent) => {
+      setLocalPointer('mouse', e.clientX, e.clientY, true);
+    };
+    const handleMouseUp = (e: MouseEvent) => {
+      setLocalPointer('mouse', e.clientX, e.clientY, false);
+    };
+    const handleMouseLeave = () => {
+      const app = useAppStore.getState();
+      if (app.syncRole === 'display') return;
+
+      const key = `${clientIdRef.current}:mouse`;
+      const current = pointersRef.current[key];
+      const x = current?.x ?? -1000;
+      const y = current?.y ?? -1000;
+      pointersRef.current[key] = { x, y, isDown: false };
+
+      if (app.syncRole !== 'controller') return;
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const nx = current
+          ? Math.min(1, Math.max(0, current.x / Math.max(1, app.width)))
+          : 0;
+        const ny = current
+          ? Math.min(1, Math.max(0, current.y / Math.max(1, app.height)))
+          : 0;
+        ws.send(
+          JSON.stringify({
+            type: 'particle-sync',
+            action: 'pointer',
+            originId: clientIdRef.current,
+            source: 'controller',
+            data: { nx, ny, isDown: false, pointerId: 'mouse' },
+          }),
+        );
+        lastPointerSendAtRef.current = Date.now();
+      }
+    };
+
+    // Pointer Events (covers touch + pen + mouse in modern browsers)
+    const handlePointerMove = (e: PointerEvent) => {
+      const pid = String(e.pointerId ?? 'pointer');
+      const key = `${clientIdRef.current}:${pid}`;
+      const current = pointersRef.current[key];
+      setLocalPointer(pid, e.clientX, e.clientY, current?.isDown ?? false);
+    };
+    const handlePointerDown = (e: PointerEvent) => {
+      const pid = String(e.pointerId ?? 'pointer');
+      setLocalPointer(pid, e.clientX, e.clientY, true);
+      // Keep receiving events even if the pointer leaves the element briefly.
+      try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch {}
+    };
+    const handlePointerUp = (e: PointerEvent) => {
+      const pid = String(e.pointerId ?? 'pointer');
+      setLocalPointer(pid, e.clientX, e.clientY, false);
+    };
+    const handlePointerLeave = () => {
+      const app = useAppStore.getState();
+      if (app.syncRole === 'display') return;
+
+      const cid = clientIdRef.current;
+      for (const k of Object.keys(pointersRef.current)) {
+        if (k.startsWith(`${cid}:`)) {
+          const pt = pointersRef.current[k];
+          pointersRef.current[k] = { ...pt, isDown: false };
+          const pointerId = k.split(':')[1] ?? 'pointer';
+          if (app.syncRole !== 'controller') continue;
+          const ws = wsRef.current;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            const nx = Math.min(1, Math.max(0, pt.x / Math.max(1, app.width)));
+            const ny = Math.min(1, Math.max(0, pt.y / Math.max(1, app.height)));
+            ws.send(
+              JSON.stringify({
+                type: 'particle-sync',
+                action: 'pointer',
+                originId: clientIdRef.current,
+                source: 'controller',
+                data: { nx, ny, isDown: false, pointerId },
+              }),
+            );
+            lastPointerSendAtRef.current = Date.now();
+          }
+        }
+      }
+    };
+
+    // Touch fallback (in case pointer events are not supported on the PAD browser)
+    const handleTouchMove = (e: TouchEvent) => {
+      const t = e.touches[0];
+      if (!t) return;
+      setLocalPointer('touch0', t.clientX, t.clientY, pointersRef.current[`${clientIdRef.current}:touch0`]?.isDown ?? false);
+    };
+    const handleTouchStart = (e: TouchEvent) => {
+      const t = e.touches[0];
+      if (!t) return;
+      setLocalPointer('touch0', t.clientX, t.clientY, true);
+      // Prevent browser scroll while interacting with the particle field.
+      e.preventDefault();
+    };
+    const handleTouchEnd = () => {
+      const key = `${clientIdRef.current}:touch0`;
+      const current = pointersRef.current[key];
+      pointersRef.current[key] = { x: current?.x ?? -1000, y: current?.y ?? -1000, isDown: false };
+    };
 
     renderer.domElement.addEventListener('mousemove', handleMouseMove);
     renderer.domElement.addEventListener('mousedown', handleMouseDown);
     renderer.domElement.addEventListener('mouseup', handleMouseUp);
     renderer.domElement.addEventListener('mouseleave', handleMouseLeave);
+
+    renderer.domElement.addEventListener('pointermove', handlePointerMove);
+    renderer.domElement.addEventListener('pointerdown', handlePointerDown);
+    renderer.domElement.addEventListener('pointerup', handlePointerUp);
+    renderer.domElement.addEventListener('pointerleave', handlePointerLeave);
+
+    renderer.domElement.addEventListener('touchmove', handleTouchMove, { passive: true });
+    renderer.domElement.addEventListener('touchstart', handleTouchStart, { passive: false });
+    renderer.domElement.addEventListener('touchend', handleTouchEnd);
+    renderer.domElement.addEventListener('touchcancel', handleTouchEnd);
 
     // Start loop
     renderLoop();
@@ -191,6 +648,16 @@ export const ParticleCanvas: React.FC = () => {
       renderer.domElement.removeEventListener('mousedown', handleMouseDown);
       renderer.domElement.removeEventListener('mouseup', handleMouseUp);
       renderer.domElement.removeEventListener('mouseleave', handleMouseLeave);
+
+      renderer.domElement.removeEventListener('pointermove', handlePointerMove);
+      renderer.domElement.removeEventListener('pointerdown', handlePointerDown);
+      renderer.domElement.removeEventListener('pointerup', handlePointerUp);
+      renderer.domElement.removeEventListener('pointerleave', handlePointerLeave);
+
+      renderer.domElement.removeEventListener('touchmove', handleTouchMove);
+      renderer.domElement.removeEventListener('touchstart', handleTouchStart);
+      renderer.domElement.removeEventListener('touchend', handleTouchEnd);
+      renderer.domElement.removeEventListener('touchcancel', handleTouchEnd);
       renderer.dispose();
       rtA.dispose();
       rtB.dispose();
@@ -285,9 +752,13 @@ export const ParticleCanvas: React.FC = () => {
     const sim = simRef.current;
     const currentState = useAppStore.getState();
     const { width, height, flowSpeed, noiseScale, vortexStrength, vortexRange, clickRepulsion, useImageColors, colors } = currentState;
-    const mouse = mouseRef.current;
+    // dt 用于尽量减少不同设备 FPS 导致的状态漂移
+    const now = performance.now();
+    const lastTs = sim.lastTs ?? now;
+    const dt = Math.min(2, Math.max(0.25, (now - lastTs) / 16.6667));
+    sim.lastTs = now;
 
-    sim.time += 0.005;
+    sim.time += 0.005 * dt;
 
     const positions = sim.particleGeometry.attributes.position.array as Float32Array;
     const colorArray = sim.particleGeometry.attributes.color.array as Float32Array;
@@ -299,25 +770,31 @@ export const ParticleCanvas: React.FC = () => {
 
     const parsedColors = colors.map(c => new THREE.Color(c));
 
+    // 同时来自多设备/多触点的输入点
+    const activePointers = Object.values(pointersRef.current).filter(
+      (pt): pt is { x: number; y: number; isDown: boolean } =>
+        Boolean(pt && typeof pt === 'object' && (pt as { isDown?: boolean }).isDown),
+    );
+
     for (let i = 0; i < sim.particles.length; i++) {
       const p = sim.particles[i];
 
       // Vortex on click
-      if (mouse.isDown) {
-        const dx = mouse.x - p.x;
-        const dy = mouse.y - p.y;
+      for (const pt of activePointers) {
+        const dx = pt.x - p.x;
+        const dy = pt.y - p.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        
+
         if (dist < vortexRange && dist > 0) {
           const force = (vortexRange - dist) / vortexRange;
-          
+
           // Vortex (perpendicular)
-          p.vx += (dy / dist) * force * vortexStrength;
-          p.vy -= (dx / dist) * force * vortexStrength;
-          
+          p.vx += (dy / dist) * force * vortexStrength * dt;
+          p.vy -= (dx / dist) * force * vortexStrength * dt;
+
           // Inward attraction to form a cohesive swirling vortex
-          p.vx += (dx / dist) * force * clickRepulsion * 0.1;
-          p.vy += (dy / dist) * force * clickRepulsion * 0.1;
+          p.vx += (dx / dist) * force * clickRepulsion * 0.1 * dt;
+          p.vy += (dy / dist) * force * clickRepulsion * 0.1 * dt;
         }
       }
 
@@ -327,19 +804,20 @@ export const ParticleCanvas: React.FC = () => {
       
       if (currentSpeed > targetSpeed) {
         // Dampen excess speed from vortex
-        p.vx *= 0.95;
-        p.vy *= 0.95;
+        const damp = Math.pow(0.95, dt);
+        p.vx *= damp;
+        p.vy *= damp;
       } else if (currentSpeed < targetSpeed && currentSpeed > 0.001) {
         // Accelerate back to base speed smoothly
-        p.vx += (p.vx / currentSpeed) * (targetSpeed - currentSpeed) * 0.05;
-        p.vy += (p.vy / currentSpeed) * (targetSpeed - currentSpeed) * 0.05;
+        p.vx += (p.vx / currentSpeed) * (targetSpeed - currentSpeed) * 0.05 * dt;
+        p.vy += (p.vy / currentSpeed) * (targetSpeed - currentSpeed) * 0.05 * dt;
       } else if (currentSpeed <= 0.001) {
         p.vx = Math.cos(p.angle) * targetSpeed;
         p.vy = Math.sin(p.angle) * targetSpeed;
       }
 
-      p.x += p.vx;
-      p.y += p.vy;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
 
       // Bounce off walls
       if (p.x <= 0) {
@@ -410,10 +888,96 @@ export const ParticleCanvas: React.FC = () => {
     const temp = sim.rtA;
     sim.rtA = sim.rtB;
     sim.rtB = temp;
+
+    // 5. 局域镜像：按 FPS 将当前 WebGL 画布缩放编码为 JPEG 发往 8082
+    const ms = useAppStore.getState();
+    if (ms.mirrorMode === 'publish') {
+      const mws = mirrorWsRef.current;
+      if (mws && mws.readyState === WebSocket.OPEN && !sim.mirrorPending) {
+        const fps = Math.max(1, ms.mirrorPublishFps);
+        const interval = 1000 / fps;
+        if (now - (sim.mirrorLastAt || 0) >= interval) {
+          sim.mirrorLastAt = now;
+          const el = sim.renderer.domElement;
+          const w = el.width;
+          const h = el.height;
+          const maxEdge = Math.max(320, ms.mirrorMaxEdge);
+          const scale = Math.min(1, maxEdge / Math.max(w, h, 1));
+          const tw = Math.max(1, Math.round(w * scale));
+          const th = Math.max(1, Math.round(h * scale));
+          if (!sim.mirrorCapCanvas) {
+            sim.mirrorCapCanvas = document.createElement('canvas');
+          }
+          const cap = sim.mirrorCapCanvas;
+          if (cap.width !== tw || cap.height !== th) {
+            cap.width = tw;
+            cap.height = th;
+          }
+          const ctx2d = cap.getContext('2d');
+          if (ctx2d) {
+            ctx2d.drawImage(el, 0, 0, tw, th);
+            sim.mirrorPending = true;
+            const q = ms.mirrorJpegQuality;
+            cap.toBlob(
+              (blob) => {
+                sim.mirrorPending = false;
+                const cur = mirrorWsRef.current;
+                if (blob && cur && cur.readyState === WebSocket.OPEN) {
+                  try {
+                    cur.send(blob);
+                  } catch {
+                    // ignore
+                  }
+                }
+              },
+              'image/jpeg',
+              q,
+            );
+          }
+        }
+      }
+    }
   };
 
   return (
     <div className="w-full h-full flex items-center justify-center bg-black overflow-hidden relative">
+      {mirrorMode === 'view' ? (
+        <div className="fixed inset-0 z-[10001] bg-black flex flex-col">
+          <img
+            ref={mirrorImgRef}
+            alt="局域网镜像"
+            className="flex-1 w-full object-contain select-none bg-black"
+          />
+          <div className="shrink-0 p-2 flex flex-wrap justify-between items-center gap-2 bg-black/85 text-white text-[11px] border-t border-white/15">
+            <span>
+              接收 PAD 画面 · 可配合 OBS「窗口采集」转 NDI ·{' '}
+              <span className="text-amber-200/90">{mirrorDiag}</span>
+            </span>
+            <button
+              type="button"
+              className="pointer-events-auto px-3 py-1.5 rounded border border-white/30 hover:bg-white/10 text-xs"
+              onClick={() => useAppStore.getState().setMirrorMode('off')}
+            >
+              关闭预览
+            </button>
+          </div>
+        </div>
+      ) : null}
+      <div
+        className="absolute top-16 right-3 z-[9999] px-3 py-1 text-[11px] leading-tight rounded bg-black/70 border border-white/20 text-white pointer-events-none"
+      >
+        <div>
+          {syncRole === 'standalone' ? '单机' : syncRole === 'controller' ? '控制端 PAD' : '显示端 PC'} · Sync{' '}
+          {syncRole === 'standalone' ? '—' : wsConnected ? 'ON' : 'OFF'}
+        </div>
+        {syncRole !== 'standalone' && roomId ? (
+          <div className="opacity-90">room: {roomId}</div>
+        ) : null}
+        {wsDiag ? <div className="opacity-90">{wsDiag}</div> : null}
+        {mirrorMode !== 'off' && mirrorDiag ? (
+          <div className="opacity-90 text-amber-100/90 mt-0.5 border-t border-white/10 pt-0.5">Mirror: {mirrorDiag}</div>
+        ) : null}
+      </div>
       {state.useImageColors && state.imageUrl && (
         <img 
           src={state.imageUrl} 

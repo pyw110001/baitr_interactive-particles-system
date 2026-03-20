@@ -1,6 +1,6 @@
 import React, { useRef } from 'react';
 import { useAppStore } from '../store';
-import { ChevronLeft, ChevronRight, Settings, Upload, Download, Pause, Play, Save, FolderOpen } from 'lucide-react';
+import { ChevronLeft, Settings, Upload, Download, Pause, Play, Save, MonitorPlay, Smartphone, Monitor } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -12,44 +12,54 @@ export const Sidebar: React.FC = () => {
   const state = useAppStore();
   const [isOpen, setIsOpen] = React.useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const settingsInputRef = useRef<HTMLInputElement>(null);
 
   const handleSaveSettings = () => {
     const {
-      resolution, width, height, seed, particleCount, flowSpeed, noiseScale,
-      trailPersistence, vortexStrength, vortexRange, clickRepulsion, particleSize,
-      useImageColors, imageOpacity, colors
+      resolution,
+      width,
+      height,
+      seed,
+      particleCount,
+      flowSpeed,
+      noiseScale,
+      trailPersistence,
+      vortexStrength,
+      vortexRange,
+      clickRepulsion,
+      particleSize,
+      useImageColors,
+      imageOpacity,
+      colors,
+      isPaused,
+      imageUrl,
     } = state;
-    
-    const settings = {
-      resolution, width, height, seed, particleCount, flowSpeed, noiseScale,
-      trailPersistence, vortexStrength, vortexRange, clickRepulsion, particleSize,
-      useImageColors, imageOpacity, colors
-    };
-    
-    const blob = new Blob([JSON.stringify(settings, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'particle-settings.json';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
 
-  const handleLoadSettings = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        try {
-          const settings = JSON.parse(event.target?.result as string);
-          state.setAppState(settings);
-        } catch (error) {
-          console.error('Failed to parse settings JSON', error);
-          alert('Invalid settings file.');
-        }
-      };
-      reader.readAsText(file);
+    const settings = {
+      resolution,
+      width,
+      height,
+      seed,
+      particleCount,
+      flowSpeed,
+      noiseScale,
+      trailPersistence,
+      vortexStrength,
+      vortexRange,
+      clickRepulsion,
+      particleSize,
+      useImageColors,
+      imageOpacity,
+      colors,
+      isPaused,
+      imageUrl,
+    };
+
+    try {
+      window.localStorage.setItem('baitr_particle_settings_v1', JSON.stringify(settings));
+      // Give quick feedback without blocking.
+      // eslint-disable-next-line no-alert
+    } catch (e) {
+      console.error('Failed to save settings to localStorage', e);
     }
   };
 
@@ -73,29 +83,38 @@ export const Sidebar: React.FC = () => {
     }
   };
 
-  if (!isOpen) {
-    return (
-      <button 
-        onClick={() => setIsOpen(true)}
-        className="absolute top-4 left-4 z-50 bg-black/80 text-white p-2 rounded-md border border-white/20 hover:bg-black flex items-center gap-2"
-      >
-        <Settings size={16} /> Open Settings
-      </button>
-    );
-  }
-
   return (
-    <div className="absolute top-0 left-0 h-full w-80 bg-black/90 text-white border-r border-white/10 overflow-y-auto z-50 flex flex-col font-mono text-sm">
-      <div className="p-4 border-b border-white/10 flex justify-between items-center sticky top-0 bg-black/90 z-10">
-        <div className="flex items-center gap-2">
-          <button onClick={() => setIsOpen(false)} className="hover:bg-white/10 p-1 rounded">
-            <ChevronLeft size={20} />
-          </button>
-          <span className="font-bold">Hide Settings</span>
-        </div>
-      </div>
+    <>
+      {!isOpen && (
+        <button
+          onClick={() => setIsOpen(true)}
+          className="absolute top-4 left-4 z-[60] bg-black/80 text-white p-2 rounded-md border border-white/20 hover:bg-black flex items-center gap-2 transition-opacity duration-300"
+        >
+          <Settings size={16} /> Open Settings
+        </button>
+      )}
 
-      <div className="p-4 space-y-6">
+      <div
+        className={[
+          'absolute top-0 left-0 h-full w-80 bg-black/90 text-white border-r border-white/10 overflow-y-auto z-50 flex flex-col font-mono text-sm',
+          'transition-transform duration-500 ease-in-out',
+        ].join(' ')}
+        style={{
+          transform: isOpen ? 'translateX(0)' : 'translateX(-100%)',
+          opacity: isOpen ? 1 : 0,
+          pointerEvents: isOpen ? 'auto' : 'none',
+        }}
+      >
+        <div className="p-4 border-b border-white/10 flex justify-between items-center sticky top-0 bg-black/90 z-10">
+          <div className="flex items-center gap-2">
+            <button onClick={() => setIsOpen(false)} className="hover:bg-white/10 p-1 rounded">
+              <ChevronLeft size={20} />
+            </button>
+            <span className="font-bold">Hide Settings</span>
+          </div>
+        </div>
+
+        <div className="p-4 space-y-6">
         <div>
           <h2 className="text-xl font-bold mb-1">Luminous Resonance</h2>
           <p className="text-xs text-gray-400">Interactive particle field responding to mouse movement with organic flow dynamics</p>
@@ -218,6 +237,175 @@ export const Sidebar: React.FC = () => {
           ))}
         </Section>
 
+        <Section title="多终端同步 · 房间 (WebSocket)">
+          <p className="text-xs text-gray-400 mb-3 leading-relaxed">
+            电脑先运行 <code className="text-gray-300">npm run sync-server</code>（默认 <strong>8081</strong>），再开两个浏览器：
+            PAD 选「控制端」、电脑选「显示端」，填写<strong>相同 roomId</strong>。 pointer 以画布内{' '}
+            <strong>归一化坐标 (nx, ny ∈ [0,1])</strong> 同步，显示端映射到当前分辨率下的涡旋交互。
+          </p>
+          <div className="flex flex-wrap gap-2 mb-3">
+            <button
+              type="button"
+              onClick={() => state.setSyncRole('standalone')}
+              className={cn(
+                'py-1.5 px-2 rounded border text-xs',
+                state.syncRole === 'standalone'
+                  ? 'bg-white text-black border-white'
+                  : 'bg-white/10 border-white/20 hover:bg-white/15',
+              )}
+            >
+              单机
+            </button>
+            <button
+              type="button"
+              onClick={() => state.setSyncRole('controller')}
+              className={cn(
+                'py-1.5 px-2 rounded border text-xs flex items-center gap-1',
+                state.syncRole === 'controller'
+                  ? 'bg-cyan-600 text-white border-cyan-400'
+                  : 'bg-white/10 border-white/20 hover:bg-white/15',
+              )}
+            >
+              <Smartphone size={14} /> PAD 控制端
+            </button>
+            <button
+              type="button"
+              onClick={() => state.setSyncRole('display')}
+              className={cn(
+                'py-1.5 px-2 rounded border text-xs flex items-center gap-1',
+                state.syncRole === 'display'
+                  ? 'bg-violet-600 text-white border-violet-400'
+                  : 'bg-white/10 border-white/20 hover:bg-white/15',
+              )}
+            >
+              <Monitor size={14} /> PC 显示端
+            </button>
+          </div>
+          <label className="block text-xs text-gray-400 mb-1">房间 ID（roomId）</label>
+          <input
+            type="text"
+            value={state.roomId}
+            onChange={(e) => state.setRoomId(e.target.value)}
+            placeholder="例如 demo-room"
+            className="w-full bg-black border border-white/20 rounded p-2 text-sm mb-3"
+          />
+          <label className="block text-xs text-gray-400 mb-1">
+            同步服务 WS 地址（可选，默认当前主机 :8081）
+          </label>
+          <input
+            type="text"
+            value={state.syncWsBaseUrl}
+            onChange={(e) => state.setSyncWsBaseUrl(e.target.value)}
+            placeholder="ws://192.168.x.x:8081"
+            className="w-full bg-black border border-white/20 rounded p-2 text-sm mb-3"
+          />
+          <label className="flex items-center gap-2 text-sm cursor-pointer mb-2">
+            <input
+              type="checkbox"
+              checked={state.uiCompact}
+              onChange={(e) => state.setUiCompact(e.target.checked)}
+              className="accent-white"
+            />
+            PAD 简洁模式（隐藏本侧边栏）
+          </label>
+          <p className="text-[10px] text-gray-500 mt-1 leading-relaxed">
+            快捷链接示例：
+            <br />
+            <code className="text-gray-400 break-all">
+              ?role=controller&room=demo&compact=1
+            </code>
+            <br />
+            <code className="text-gray-400 break-all">
+              ?role=display&room=demo
+            </code>
+            <br />
+            若 PAD 打开的页面不在同步服务同一台机器，请加：{' '}
+            <code className="text-gray-400">?ws=ws://电脑IP:8081</code>
+          </p>
+        </Section>
+
+        <Section title="局域网画面 · NDI 工作流">
+          <div className="flex items-center gap-2 mb-2 text-white/90">
+            <MonitorPlay size={16} />
+            <span className="text-xs font-semibold">PAD → 电脑 低延迟回传</span>
+          </div>
+          <p className="text-xs text-gray-400 mb-3 leading-relaxed">
+            浏览器无法直接生成标准 NDI 码流。此处通过 <strong className="text-gray-300">WebSocket 8082</strong> 将画布以
+            JPEG 广播到局域网；电脑端「接收预览」全屏显示后，可用 <strong className="text-gray-300">OBS 窗口采集</strong> +
+            NDI 插件转为真正的 NDI 输出。
+          </p>
+          <div className="flex flex-wrap gap-2 mb-3">
+            <button
+              type="button"
+              onClick={() => state.setMirrorMode('off')}
+              className={cn(
+                'py-1.5 px-2 rounded border text-xs',
+                state.mirrorMode === 'off'
+                  ? 'bg-white text-black border-white'
+                  : 'bg-white/10 border-white/20 hover:bg-white/15',
+              )}
+            >
+              关闭
+            </button>
+            <button
+              type="button"
+              onClick={() => state.setMirrorMode('publish')}
+              className={cn(
+                'py-1.5 px-2 rounded border text-xs',
+                state.mirrorMode === 'publish'
+                  ? 'bg-cyan-600 text-white border-cyan-400'
+                  : 'bg-white/10 border-white/20 hover:bg-white/15',
+              )}
+            >
+              播送画面 (PAD)
+            </button>
+            <button
+              type="button"
+              onClick={() => state.setMirrorMode('view')}
+              className={cn(
+                'py-1.5 px-2 rounded border text-xs',
+                state.mirrorMode === 'view'
+                  ? 'bg-violet-600 text-white border-violet-400'
+                  : 'bg-white/10 border-white/20 hover:bg-white/15',
+              )}
+            >
+              接收预览 (PC)
+            </button>
+          </div>
+          {state.mirrorMode === 'publish' ? (
+            <div className="space-y-1 border border-white/10 rounded p-2 bg-black/40">
+              <Slider
+                label="回传帧率 (FPS)"
+                value={state.mirrorPublishFps}
+                min={4}
+                max={24}
+                step={1}
+                onChange={(v) => state.setAppState({ mirrorPublishFps: v })}
+              />
+              <Slider
+                label="JPEG 质量"
+                value={state.mirrorJpegQuality}
+                min={0.45}
+                max={0.92}
+                step={0.02}
+                onChange={(v) => state.setAppState({ mirrorJpegQuality: v })}
+              />
+              <Slider
+                label="编码最长边 (px)"
+                value={state.mirrorMaxEdge}
+                min={640}
+                max={1920}
+                step={40}
+                onChange={(v) => state.setAppState({ mirrorMaxEdge: v })}
+              />
+            </div>
+          ) : null}
+          <p className="text-[10px] text-gray-500 mt-2">
+            快捷 URL：<code className="text-gray-400">?mirror=publish</code> 或{' '}
+            <code className="text-gray-400">?mirror=view</code>
+          </p>
+        </Section>
+
         <Section title="Actions">
           <div className="flex gap-2 mb-2">
             <button 
@@ -239,25 +427,13 @@ export const Sidebar: React.FC = () => {
               onClick={handleSaveSettings}
               className="flex-1 bg-white/10 hover:bg-white/20 py-2 px-2 rounded border border-white/20 flex items-center justify-center gap-2 text-sm"
             >
-              <Save size={14} /> Save Settings
+              <Save size={14} /> SAVE SETTINGS
             </button>
-            <button 
-              onClick={() => settingsInputRef.current?.click()}
-              className="flex-1 bg-white/10 hover:bg-white/20 py-2 px-2 rounded border border-white/20 flex items-center justify-center gap-2 text-sm"
-            >
-              <FolderOpen size={14} /> Load Settings
-            </button>
-            <input 
-              type="file" 
-              ref={settingsInputRef} 
-              onChange={handleLoadSettings} 
-              accept=".json" 
-              className="hidden" 
-            />
           </div>
         </Section>
+        </div>
       </div>
-    </div>
+    </>
   );
 };
 
