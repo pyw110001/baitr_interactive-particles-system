@@ -37,3 +37,14 @@ View your app in AI Studio: https://ai.studio/apps/8db4ee75-5eb9-4f4b-b38c-5617a
 5. **坐标**：控制端在**画布可见区域**内上报 `nx, ny ∈ [0,1]`，显示端按当前 `width/height` 映射为像素后接入现有涡旋力场。
 
 6. **扩展多点触控**：已在每条消息中带 `pointerId`；后续可在控制端对 `touchmove` / `pointermove` 的 **每一个** `Touch` / `pointerId` 分别调用 `setLocalPointer`，并在显示端沿用 `originId:pointerId` 作为键，即可多指并行涡旋（当前首版仍以单指路径为主，数据结构已预留）。
+
+## Windows 桌面 exe 一键包
+
+```bash
+npm install
+npm run build:win
+```
+
+- 输出：**`release/particle-desktop.exe`**（内置 HTTP **3000** + 同步 WS **8081**，无需再开 `sync-server`）。
+- 其他电脑 / PAD：`http://<运行 exe 的机器IP>:3000/`，联机方式与上文相同。
+- 流程说明与排障见 **`PKG_PACKAGING_GUIDE.md`** §7。

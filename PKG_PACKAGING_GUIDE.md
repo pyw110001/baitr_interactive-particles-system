@@ -99,4 +99,36 @@ const PROJECT_ROOT = _rootValue;
 - [ ] 本地 `pnpm start` 与打包后的 `.exe` 是否都能正常握手 WebSocket？
 
 ---
+
+## 7. 本项目：`baitr_interactive-particles-system`（Windows `.exe`）
+
+已实现流程与指南一致：**Vite 产物进 `exe-public/`** → **esbuild 将 `server/desktop.ts` 打成根目录 `desktop.cjs`** → **`pkg` 封装为单文件 exe**。
+
+### 一键打包
+
+```bash
+npm install
+npm run build:win
+```
+
+产物：**`release/particle-desktop.exe`**（内置静态站 + WebSocket 同步 **8081**，HTTP **3000**）。
+
+### 运行时说明
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `HTTP_PORT` | `3000` | 浏览器访问 `http://本机IP:HTTP_PORT/` |
+| `SYNC_PORT` | `8081` | 与前端默认 `ws://主机:8081` 一致 |
+
+无需再单独运行 `npm run sync-server`，exe 已合并静态服务与中继。
+
+### 路径注意（指南 §2）
+
+`desktop.cjs` 内使用 **`__dirname`** 定位 `exe-public`（**勿**在打包链路里依赖 `import.meta.url`，否则 CJS 下会得到空对象，资源目录错乱）。
+
+### pkg 警告
+
+若出现与 **Vite / @google/genai** 等无关依赖的 bytecode 警告，多为 pkg 对仓库 `node_modules` 的扫描行为，**不影响**仅依赖 `desktop.cjs` 与 `exe-public` 的运行；以实际运行 `particle-desktop.exe` 为准。
+
+---
 *总结：打包成功的关键在于 **“路径确定性”** 和 **“依赖归一化”**。*
