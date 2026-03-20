@@ -1,11 +1,46 @@
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { createNoise3D } from 'simplex-noise';
+import { clampNormalized } from '../lib/runtime';
+import { usePointerStore, createPointerKey, type InputPointer } from '../stores/pointerStore';
 import { useAppStore } from '../store';
 
-// Simple seeded random function
+interface Particle {
+  id: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  angle: number;
+  speedMult: number;
+  colorIndex: number;
+}
+
+interface SimulationContext {
+  renderer: THREE.WebGLRenderer;
+  rtA: THREE.WebGLRenderTarget;
+  rtB: THREE.WebGLRenderTarget;
+  fadeMaterial: THREE.ShaderMaterial;
+  copyMaterial: THREE.ShaderMaterial;
+  fadeScene: THREE.Scene;
+  copyScene: THREE.Scene;
+  particleScene: THREE.Scene;
+  particleGeometry: THREE.BufferGeometry;
+  particleMaterial: THREE.PointsMaterial;
+  orthoCamera: THREE.OrthographicCamera;
+  particles: Particle[];
+  time: number;
+  noise3D: ReturnType<typeof createNoise3D>;
+  animationFrameId: number;
+  cachedImageData: ImageData | null;
+}
+
+interface ParticleCanvasProps {
+  enableLocalPointer: boolean;
+}
+
 function mulberry32(a: number) {
-  return function () {
+  return function random() {
     let t = (a += 0x6d2b79f5);
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
@@ -13,45 +48,47 @@ function mulberry32(a: number) {
   };
 }
 
-export const ParticleCanvas: React.FC = () => {
+function pointerToCanvasSpace(pointer: InputPointer, width: number, height: number) {
+  return {
+    x: pointer.normalizedX * width,
+    y: pointer.normalizedY * height,
+  };
+}
+
+export const ParticleCanvas: React.FC<ParticleCanvasProps> = ({ enableLocalPointer }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const state = useAppStore();
-  
-  // Refs for mutable state that shouldn't trigger re-renders
-  const simRef = useRef<any>(null);
-  const mouseRef = useRef({ x: -1000, y: -1000, isDown: false });
+  const simRef = useRef<SimulationContext | null>(null);
   const imageCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const state = useAppStore();
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!containerRef.current) {
+      return undefined;
+    }
 
-    // Initialize Three.js
     const renderer = new THREE.WebGLRenderer({ preserveDrawingBuffer: true, antialias: false, alpha: true });
-    renderer.setClearColor(0x000000, 0); // Transparent background
+    renderer.setClearColor(0x000000, 0);
     renderer.setSize(state.width, state.height, false);
     renderer.domElement.style.maxWidth = '100%';
     renderer.domElement.style.maxHeight = '100%';
     renderer.domElement.style.aspectRatio = `${state.width} / ${state.height}`;
     renderer.autoClear = false;
+
     containerRef.current.innerHTML = '';
     containerRef.current.appendChild(renderer.domElement);
 
-    // Cameras
     const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-
-    // Render Targets for Trails (Ping-Pong)
-    let rtA = new THREE.WebGLRenderTarget(state.width, state.height, {
+    const rtA = new THREE.WebGLRenderTarget(state.width, state.height, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
     });
-    let rtB = new THREE.WebGLRenderTarget(state.width, state.height, {
+    const rtB = new THREE.WebGLRenderTarget(state.width, state.height, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
     });
 
-    // Fade Scene
     const fadeScene = new THREE.Scene();
     const fadeMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -79,10 +116,8 @@ export const ParticleCanvas: React.FC = () => {
       depthWrite: false,
       depthTest: false,
     });
-    const fadeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), fadeMaterial);
-    fadeScene.add(fadeQuad);
+    fadeScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), fadeMaterial));
 
-    // Copy Scene (to screen)
     const copyScene = new THREE.Scene();
     const copyMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -107,27 +142,28 @@ export const ParticleCanvas: React.FC = () => {
       depthWrite: false,
       depthTest: false,
     });
-    const copyQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), copyMaterial);
-    copyScene.add(copyQuad);
+    copyScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), copyMaterial));
 
-    // Particle Scene
     const particleScene = new THREE.Scene();
     const particleGeometry = new THREE.BufferGeometry();
-    
-    // Create circular particle texture
+
     const canvas = document.createElement('canvas');
     canvas.width = 32;
     canvas.height = 32;
-    const ctx = canvas.getContext('2d')!;
-    const gradient = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    const context = canvas.getContext('2d');
+    if (!context) {
+      return undefined;
+    }
+
+    const gradient = context.createRadialGradient(16, 16, 0, 16, 16, 16);
     gradient.addColorStop(0, 'rgba(255,255,255,1)');
     gradient.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.arc(16, 16, 16, 0, Math.PI * 2);
-    ctx.fill();
-    const particleTexture = new THREE.CanvasTexture(canvas);
+    context.fillStyle = gradient;
+    context.beginPath();
+    context.arc(16, 16, 16, 0, Math.PI * 2);
+    context.fill();
 
+    const particleTexture = new THREE.CanvasTexture(canvas);
     const particleMaterial = new THREE.PointsMaterial({
       size: state.particleSize,
       sizeAttenuation: false,
@@ -139,10 +175,9 @@ export const ParticleCanvas: React.FC = () => {
       depthWrite: false,
       depthTest: false,
     });
-    const particlesMesh = new THREE.Points(particleGeometry, particleMaterial);
-    particleScene.add(particlesMesh);
 
-    // Save to ref
+    particleScene.add(new THREE.Points(particleGeometry, particleMaterial));
+
     simRef.current = {
       renderer,
       rtA,
@@ -162,35 +197,74 @@ export const ParticleCanvas: React.FC = () => {
       cachedImageData: null,
     };
 
-    // Initialize particles
     initParticles();
 
-    // Event Listeners
-    const handleMouseMove = (e: MouseEvent) => {
+    const updateLocalPointer = (event: PointerEvent, isDown: boolean) => {
+      if (!enableLocalPointer) {
+        return;
+      }
+
       const rect = renderer.domElement.getBoundingClientRect();
-      const scaleX = state.width / rect.width;
-      const scaleY = state.height / rect.height;
-      mouseRef.current.x = (e.clientX - rect.left) * scaleX;
-      mouseRef.current.y = (e.clientY - rect.top) * scaleY;
+      const normalizedX = clampNormalized((event.clientX - rect.left) / rect.width);
+      const normalizedY = clampNormalized((event.clientY - rect.top) / rect.height);
+      const key = createPointerKey('local', event.pointerId);
+      usePointerStore.getState().upsertPointer({
+        key,
+        pointerId: event.pointerId,
+        normalizedX,
+        normalizedY,
+        isDown,
+        timestamp: Date.now(),
+        source: 'local',
+        sourceRole: 'standalone',
+      });
+
+      if (!isDown) {
+        usePointerStore.getState().removePointer(key);
+      }
     };
-    const handleMouseDown = () => { mouseRef.current.isDown = true; };
-    const handleMouseUp = () => { mouseRef.current.isDown = false; };
-    const handleMouseLeave = () => { mouseRef.current.x = -1000; mouseRef.current.y = -1000; mouseRef.current.isDown = false; };
 
-    renderer.domElement.addEventListener('mousemove', handleMouseMove);
-    renderer.domElement.addEventListener('mousedown', handleMouseDown);
-    renderer.domElement.addEventListener('mouseup', handleMouseUp);
-    renderer.domElement.addEventListener('mouseleave', handleMouseLeave);
+    const handlePointerDown = (event: PointerEvent) => {
+      renderer.domElement.setPointerCapture(event.pointerId);
+      updateLocalPointer(event, true);
+    };
 
-    // Start loop
+    const handlePointerMove = (event: PointerEvent) => {
+      const pointerKey = createPointerKey('local', event.pointerId);
+      const existingPointer = usePointerStore.getState().pointers[pointerKey];
+      if (!existingPointer && event.buttons === 0) {
+        return;
+      }
+
+      updateLocalPointer(event, existingPointer?.isDown ?? event.buttons > 0);
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      updateLocalPointer(event, false);
+    };
+
+    const handlePointerLeave = (event: PointerEvent) => {
+      updateLocalPointer(event, false);
+    };
+
+    renderer.domElement.addEventListener('pointerdown', handlePointerDown);
+    renderer.domElement.addEventListener('pointermove', handlePointerMove);
+    renderer.domElement.addEventListener('pointerup', handlePointerUp);
+    renderer.domElement.addEventListener('pointercancel', handlePointerUp);
+    renderer.domElement.addEventListener('pointerleave', handlePointerLeave);
+
     renderLoop();
 
     return () => {
-      cancelAnimationFrame(simRef.current.animationFrameId);
-      renderer.domElement.removeEventListener('mousemove', handleMouseMove);
-      renderer.domElement.removeEventListener('mousedown', handleMouseDown);
-      renderer.domElement.removeEventListener('mouseup', handleMouseUp);
-      renderer.domElement.removeEventListener('mouseleave', handleMouseLeave);
+      if (simRef.current) {
+        cancelAnimationFrame(simRef.current.animationFrameId);
+      }
+      usePointerStore.getState().clearPointersBySource('local');
+      renderer.domElement.removeEventListener('pointerdown', handlePointerDown);
+      renderer.domElement.removeEventListener('pointermove', handlePointerMove);
+      renderer.domElement.removeEventListener('pointerup', handlePointerUp);
+      renderer.domElement.removeEventListener('pointercancel', handlePointerUp);
+      renderer.domElement.removeEventListener('pointerleave', handlePointerLeave);
       renderer.dispose();
       rtA.dispose();
       rtB.dispose();
@@ -200,61 +274,75 @@ export const ParticleCanvas: React.FC = () => {
       copyMaterial.dispose();
       particleTexture.dispose();
     };
-  }, [state.width, state.height]); // Re-init on resize
+  }, [enableLocalPointer, state.height, state.seed, state.trailPersistence, state.width]);
 
-  // Handle Image Upload for Color Mapping
   useEffect(() => {
     if (state.imageUrl) {
-      const img = new Image();
-      img.crossOrigin = 'Anonymous';
-      img.onload = () => {
+      const image = new Image();
+      image.crossOrigin = 'Anonymous';
+      image.onload = () => {
         const canvas = document.createElement('canvas');
         canvas.width = state.width;
         canvas.height = state.height;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, state.width, state.height);
-          imageCanvasRef.current = canvas;
-          simRef.current.cachedImageData = ctx.getImageData(0, 0, state.width, state.height);
+        const context = canvas.getContext('2d');
+        if (!context || !simRef.current) {
+          return;
         }
-      };
-      img.src = state.imageUrl;
-    } else {
-      imageCanvasRef.current = null;
-      if (simRef.current) simRef.current.cachedImageData = null;
-    }
-  }, [state.imageUrl, state.width, state.height]);
 
-  // Update parameters without re-init
+        context.drawImage(image, 0, 0, state.width, state.height);
+        imageCanvasRef.current = canvas;
+        simRef.current.cachedImageData = context.getImageData(0, 0, state.width, state.height);
+      };
+      image.src = state.imageUrl;
+      return;
+    }
+
+    imageCanvasRef.current = null;
+    if (simRef.current) {
+      simRef.current.cachedImageData = null;
+    }
+  }, [state.height, state.imageUrl, state.width]);
+
   useEffect(() => {
-    if (!simRef.current) return;
+    if (!simRef.current) {
+      return;
+    }
+
     simRef.current.noise3D = createNoise3D(mulberry32(state.seed));
     initParticles();
-  }, [state.seed, state.particleCount]);
+  }, [state.particleCount, state.seed]);
 
   useEffect(() => {
-    if (!simRef.current) return;
+    if (!simRef.current) {
+      return;
+    }
+
     simRef.current.fadeMaterial.uniforms.persistence.value = state.trailPersistence;
     simRef.current.particleMaterial.size = state.particleSize;
-  }, [state.trailPersistence, state.particleSize]);
+  }, [state.particleSize, state.trailPersistence]);
 
   useEffect(() => {
-    if (state.triggerDownload && simRef.current) {
-      const link = document.createElement('a');
-      link.download = 'luminous-resonance.png';
-      link.href = simRef.current.renderer.domElement.toDataURL('image/png');
-      link.click();
-      state.setTriggerDownload(false);
+    if (!state.triggerDownload || !simRef.current) {
+      return;
     }
-  }, [state.triggerDownload]);
+
+    const link = document.createElement('a');
+    link.download = 'luminous-resonance.png';
+    link.href = simRef.current.renderer.domElement.toDataURL('image/png');
+    link.click();
+    state.setTriggerDownload(false);
+  }, [state, state.triggerDownload]);
 
   const initParticles = () => {
-    if (!simRef.current) return;
+    if (!simRef.current) {
+      return;
+    }
+
     const { particleCount, width, height, flowSpeed } = state;
-    const particles = [];
+    const particles: Particle[] = [];
     const random = mulberry32(state.seed);
-    
-    for (let i = 0; i < particleCount; i++) {
+
+    for (let i = 0; i < particleCount; i += 1) {
       const angle = random() * Math.PI * 2;
       const speedMult = random() * 0.5 + 0.5;
       particles.push({
@@ -263,11 +351,12 @@ export const ParticleCanvas: React.FC = () => {
         y: random() * height,
         vx: Math.cos(angle) * flowSpeed * speedMult,
         vy: Math.sin(angle) * flowSpeed * speedMult,
-        angle: angle,
-        speedMult: speedMult,
+        angle,
+        speedMult,
         colorIndex: Math.floor(random() * 3),
       });
     }
+
     simRef.current.particles = particles;
 
     const positions = new Float32Array(particleCount * 3);
@@ -277,100 +366,89 @@ export const ParticleCanvas: React.FC = () => {
   };
 
   const renderLoop = () => {
-    if (!simRef.current) return;
-    simRef.current.animationFrameId = requestAnimationFrame(renderLoop);
+    if (!simRef.current) {
+      return;
+    }
 
-    if (useAppStore.getState().isPaused) return;
+    simRef.current.animationFrameId = requestAnimationFrame(renderLoop);
+    if (useAppStore.getState().isPaused) {
+      return;
+    }
 
     const sim = simRef.current;
     const currentState = useAppStore.getState();
-    const { width, height, flowSpeed, noiseScale, vortexStrength, vortexRange, clickRepulsion, useImageColors, colors } = currentState;
-    const mouse = mouseRef.current;
+    const { width, height, flowSpeed, vortexStrength, vortexRange, clickRepulsion, useImageColors, colors } = currentState;
+    const activePointers = Object.values(usePointerStore.getState().pointers).filter((pointer) => pointer.isDown);
 
     sim.time += 0.005;
 
     const positions = sim.particleGeometry.attributes.position.array as Float32Array;
     const colorArray = sim.particleGeometry.attributes.color.array as Float32Array;
+    const imageData = useImageColors && sim.cachedImageData ? sim.cachedImageData : null;
+    const parsedColors = colors.map((color) => new THREE.Color(color));
 
-    let imageData: ImageData | null = null;
-    if (useImageColors && sim.cachedImageData) {
-      imageData = sim.cachedImageData;
-    }
+    for (let i = 0; i < sim.particles.length; i += 1) {
+      const particle = sim.particles[i];
 
-    const parsedColors = colors.map(c => new THREE.Color(c));
-
-    for (let i = 0; i < sim.particles.length; i++) {
-      const p = sim.particles[i];
-
-      // Vortex on click
-      if (mouse.isDown) {
-        const dx = mouse.x - p.x;
-        const dy = mouse.y - p.y;
+      for (const pointer of activePointers) {
+        const canvasPointer = pointerToCanvasSpace(pointer, width, height);
+        const dx = canvasPointer.x - particle.x;
+        const dy = canvasPointer.y - particle.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        
+
         if (dist < vortexRange && dist > 0) {
           const force = (vortexRange - dist) / vortexRange;
-          
-          // Vortex (perpendicular)
-          p.vx += (dy / dist) * force * vortexStrength;
-          p.vy -= (dx / dist) * force * vortexStrength;
-          
-          // Inward attraction to form a cohesive swirling vortex
-          p.vx += (dx / dist) * force * clickRepulsion * 0.1;
-          p.vy += (dy / dist) * force * clickRepulsion * 0.1;
+          particle.vx += (dy / dist) * force * vortexStrength;
+          particle.vy -= (dx / dist) * force * vortexStrength;
+          particle.vx += (dx / dist) * force * clickRepulsion * 0.1;
+          particle.vy += (dy / dist) * force * clickRepulsion * 0.1;
         }
       }
 
-      // Speed regulation
-      const targetSpeed = (p.speedMult || 1) * flowSpeed;
-      const currentSpeed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
-      
+      const targetSpeed = (particle.speedMult || 1) * flowSpeed;
+      const currentSpeed = Math.sqrt(particle.vx * particle.vx + particle.vy * particle.vy);
+
       if (currentSpeed > targetSpeed) {
-        // Dampen excess speed from vortex
-        p.vx *= 0.95;
-        p.vy *= 0.95;
+        particle.vx *= 0.95;
+        particle.vy *= 0.95;
       } else if (currentSpeed < targetSpeed && currentSpeed > 0.001) {
-        // Accelerate back to base speed smoothly
-        p.vx += (p.vx / currentSpeed) * (targetSpeed - currentSpeed) * 0.05;
-        p.vy += (p.vy / currentSpeed) * (targetSpeed - currentSpeed) * 0.05;
+        particle.vx += (particle.vx / currentSpeed) * (targetSpeed - currentSpeed) * 0.05;
+        particle.vy += (particle.vy / currentSpeed) * (targetSpeed - currentSpeed) * 0.05;
       } else if (currentSpeed <= 0.001) {
-        p.vx = Math.cos(p.angle) * targetSpeed;
-        p.vy = Math.sin(p.angle) * targetSpeed;
+        particle.vx = Math.cos(particle.angle) * targetSpeed;
+        particle.vy = Math.sin(particle.angle) * targetSpeed;
       }
 
-      p.x += p.vx;
-      p.y += p.vy;
+      particle.x += particle.vx;
+      particle.y += particle.vy;
 
-      // Bounce off walls
-      if (p.x <= 0) {
-        p.x = 0;
-        p.vx *= -1;
-        p.angle = Math.atan2(p.vy, p.vx);
-      } else if (p.x >= width) {
-        p.x = width;
-        p.vx *= -1;
-        p.angle = Math.atan2(p.vy, p.vx);
-      }
-      
-      if (p.y <= 0) {
-        p.y = 0;
-        p.vy *= -1;
-        p.angle = Math.atan2(p.vy, p.vx);
-      } else if (p.y >= height) {
-        p.y = height;
-        p.vy *= -1;
-        p.angle = Math.atan2(p.vy, p.vx);
+      if (particle.x <= 0) {
+        particle.x = 0;
+        particle.vx *= -1;
+        particle.angle = Math.atan2(particle.vy, particle.vx);
+      } else if (particle.x >= width) {
+        particle.x = width;
+        particle.vx *= -1;
+        particle.angle = Math.atan2(particle.vy, particle.vx);
       }
 
-      // Map to WebGL coordinates [-1, 1]
-      positions[i * 3] = (p.x / width) * 2 - 1;
-      positions[i * 3 + 1] = -(p.y / height) * 2 + 1;
+      if (particle.y <= 0) {
+        particle.y = 0;
+        particle.vy *= -1;
+        particle.angle = Math.atan2(particle.vy, particle.vx);
+      } else if (particle.y >= height) {
+        particle.y = height;
+        particle.vy *= -1;
+        particle.angle = Math.atan2(particle.vy, particle.vx);
+      }
+
+      positions[i * 3] = (particle.x / width) * 2 - 1;
+      positions[i * 3 + 1] = -(particle.y / height) * 2 + 1;
       positions[i * 3 + 2] = 0;
 
-      // Colors
       if (useImageColors && imageData) {
-        const ix = Math.floor(p.x);
-        const iy = Math.floor(p.y);
+        const ix = Math.floor(particle.x);
+        const iy = Math.floor(particle.y);
         if (ix >= 0 && ix < width && iy >= 0 && iy < height) {
           const idx = (iy * width + ix) * 4;
           colorArray[i * 3] = imageData.data[idx] / 255;
@@ -378,7 +456,7 @@ export const ParticleCanvas: React.FC = () => {
           colorArray[i * 3 + 2] = imageData.data[idx + 2] / 255;
         }
       } else {
-        const color = parsedColors[p.colorIndex];
+        const color = parsedColors[particle.colorIndex];
         colorArray[i * 3] = color.r;
         colorArray[i * 3 + 1] = color.g;
         colorArray[i * 3 + 2] = color.b;
@@ -387,45 +465,33 @@ export const ParticleCanvas: React.FC = () => {
 
     sim.particleGeometry.attributes.position.needsUpdate = true;
     sim.particleGeometry.attributes.color.needsUpdate = true;
-
-    // Ping-Pong Rendering for Trails
-    
-    // 1. Render previous frame (rtA) to rtB with fade
     sim.fadeMaterial.uniforms.tDiffuse.value = sim.rtA.texture;
     sim.renderer.setRenderTarget(sim.rtB);
     sim.renderer.render(sim.fadeScene, sim.orthoCamera);
-
-    // 2. Render new particles to rtB
     sim.renderer.autoClear = false;
     sim.renderer.render(sim.particleScene, sim.orthoCamera);
     sim.renderer.autoClear = true;
-
-    // 3. Render rtB to screen
     sim.copyMaterial.uniforms.tDiffuse.value = sim.rtB.texture;
     sim.renderer.setRenderTarget(null);
     sim.renderer.clear();
     sim.renderer.render(sim.copyScene, sim.orthoCamera);
 
-    // 4. Swap rtA and rtB
     const temp = sim.rtA;
     sim.rtA = sim.rtB;
     sim.rtB = temp;
   };
 
   return (
-    <div className="w-full h-full flex items-center justify-center bg-black overflow-hidden relative">
+    <div className="relative flex h-full w-full items-center justify-center overflow-hidden bg-black">
       {state.useImageColors && state.imageUrl && (
-        <img 
-          src={state.imageUrl} 
-          alt="Background" 
-          className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+        <img
+          src={state.imageUrl}
+          alt="Background"
+          className="pointer-events-none absolute inset-0 h-full w-full object-cover"
           style={{ opacity: state.imageOpacity }}
         />
       )}
-      <div 
-        ref={containerRef} 
-        className="w-full h-full flex items-center justify-center relative z-10"
-      />
+      <div ref={containerRef} className="relative z-10 flex h-full w-full items-center justify-center" />
     </div>
   );
 };
